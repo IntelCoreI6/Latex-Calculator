@@ -1,0 +1,300 @@
+import React, { useState, useEffect, useRef } from 'react';
+
+const CopyIcon = ({ className = "w-4 h-4" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+  </svg>
+);
+
+const CheckIcon = ({ className = "w-4 h-4" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <polyline points="20 6 9 17 4 12"></polyline>
+  </svg>
+);
+
+export default function App() {
+  const defaultInput = "\\sqrt{\\left(0,5\\cdot0,018\\ V\\right)^2+\\left(2,999\\ V\\cdot0,001\\right)^2+\\left(-5\\cdot{10}^{-4}A\\cdot8\\Omega\\right)^2+\\left(-249,5\\ \\Omega\\cdot0,06\\cdot{10}^{-3}A\\right)^2}";
+  
+  const [input, setInput] = useState(defaultInput);
+  const [calcState, setCalcState] = useState({ result: null, error: null, logs: [], finalStr: '' });
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const katexRef = useRef(null);
+
+  const handleCopy = () => {
+    if (!calcState.finalStr) return;
+    
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(calcState.finalStr);
+    } else {
+      const textArea = document.createElement("textarea");
+      textArea.value = calcState.finalStr;
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+      } catch (err) {
+        console.error('Kopiëren mislukt', err);
+      }
+      document.body.removeChild(textArea);
+    }
+    
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Laad externe scripts
+  useEffect(() => {
+    const loadScripts = async () => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css';
+      document.head.appendChild(link);
+
+      const scriptKatex = document.createElement('script');
+      scriptKatex.src = 'https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.js';
+      scriptKatex.async = true;
+
+      const scriptMath = document.createElement('script');
+      scriptMath.src = 'https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js';
+      scriptMath.async = true;
+
+      const loadPromise = (script) => new Promise((resolve) => { script.onload = resolve; });
+
+      document.body.appendChild(scriptKatex);
+      document.body.appendChild(scriptMath);
+
+      await Promise.all([loadPromise(scriptKatex), loadPromise(scriptMath)]);
+      setIsLoaded(true);
+    };
+    loadScripts();
+  }, []);
+
+  // Transparante vertaal-engine die elke stap logt
+  const evaluateTransparently = (latex) => {
+    let currentStr = latex;
+    let logs = [];
+
+    const applyRule = (ruleName, regex, replacement) => {
+      const newStr = currentStr.replace(regex, replacement);
+      if (newStr !== currentStr) {
+        logs.push({ rule: ruleName, from: currentStr, to: newStr });
+        currentStr = newStr;
+      }
+    };
+
+    try {
+      applyRule("Decimale komma's naar punten", /(\d),(\d)/g, '$1.$2');
+      applyRule("LaTeX witruimtes en leestekens negeren", /\\[ ,;!:]/g, '');
+      applyRule("Fysieke eenheden verwijderen", /\\Omega|V|A|W|J|m|s|kg|Hz/g, '');
+      applyRule("Vermenigvuldigingen vertalen", /\\cdot|\\times/g, '*');
+      applyRule("Linker haakjes normaliseren", /\\left\(/g, '(');
+      applyRule("Rechter haakjes normaliseren", /\\right\)/g, ')');
+      applyRule("Linker blokhaken normaliseren", /\\left\[/g, '[');
+      applyRule("Rechter blokhaken normaliseren", /\\right\]/g, ']');
+      applyRule("Wortelfunctie vertalen", /\\sqrt/g, 'sqrt');
+      
+      let prevStr = "";
+      while (currentStr !== prevStr) {
+        prevStr = currentStr;
+        applyRule("Breuken vertalen naar deling", /\\frac\{([^{}]*)\}\{([^{}]*)\}/g, '(($1)/($2))');
+      }
+
+      applyRule("Accolades naar haakjes (o.a. voor machten)", /\{/g, '(');
+      applyRule("Sluitende accolades naar haakjes", /\}/g, ')');
+      applyRule("Resterende backslashes opschonen", /\\/g, '');
+
+      // Check of string leeg is
+      if (currentStr.trim() === '') return { result: null, error: null, logs, finalStr: currentStr };
+
+      const ans = window.math.evaluate(currentStr);
+      
+      if (ans !== undefined && !isNaN(ans)) {
+        // Gebruik wetenschappelijke notatie voor extremen, anders 10 decimalen precies
+        const formattedAns = window.math.format(ans, { precision: 10, lowerExp: -6, upperExp: 6 });
+        return { result: formattedAns, error: null, logs, finalStr: currentStr };
+      } else {
+        throw new Error("Wiskundige evaluatie resulteerde in een ongeldige waarde (bijv. deling door nul).");
+      }
+    } catch (err) {
+      return { 
+        result: null, 
+        error: err.message || "Syntaxisfout in geparseerde expressie.", 
+        logs, 
+        finalStr: currentStr 
+      };
+    }
+  };
+
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    if (katexRef.current && window.katex) {
+      try {
+        window.katex.render(input, katexRef.current, {
+          throwOnError: false,
+          displayMode: true,
+          strict: false
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    if (input.trim() === '') {
+      setCalcState({ result: null, error: null, logs: [], finalStr: '' });
+      return;
+    }
+
+    setCalcState(evaluateTransparently(input));
+  }, [input, isLoaded]);
+
+  return (
+    // Claude Design Language: Muted cream background, high readability, refined typography
+    <div className="min-h-screen bg-[#FDFCFB] text-[#2D2B2A] font-sans selection:bg-[#E8E1D9]">
+      <div className="max-w-4xl mx-auto px-4 py-12 space-y-8">
+        
+        <header className="border-b border-[#EAE6E0] pb-6 mb-8">
+          <h1 className="text-4xl font-serif text-[#1F1E1D] tracking-tight">Academische Evaluator</h1>
+          <p className="text-[#6B6863] mt-3 font-serif text-lg">
+            Transparante en verifieerbare LaTeX-berekeningen.
+          </p>
+        </header>
+
+        {/* Invoersectie */}
+        <section className="space-y-3">
+          <label className="block text-sm font-semibold tracking-wide text-[#5C5955] uppercase">
+            Broncode (LaTeX)
+          </label>
+          <textarea
+            className="w-full h-32 p-4 font-mono text-sm bg-white border border-[#EAE6E0] rounded-xl shadow-sm focus:ring-2 focus:ring-[#D0C8B8] focus:border-[#D0C8B8] outline-none transition-all resize-y"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            spellCheck={false}
+          />
+        </section>
+
+        {/* Visuele Weergave */}
+        <section className="space-y-3">
+          <label className="block text-sm font-semibold tracking-wide text-[#5C5955] uppercase">
+            Interpretatie
+          </label>
+          <div className="bg-white border border-[#EAE6E0] rounded-xl shadow-sm p-8 min-h-[140px] flex items-center justify-center overflow-x-auto">
+            {!isLoaded ? (
+              <span className="text-[#A39E96] font-serif italic">Initialiseren van rekensystemen...</span>
+            ) : (
+              <div ref={katexRef} className="text-xl"></div>
+            )}
+          </div>
+        </section>
+
+        {/* Resultaat & Foutafhandeling */}
+        <section className="space-y-3">
+          <label className="block text-sm font-semibold tracking-wide text-[#5C5955] uppercase">
+            Resultaat
+          </label>
+          
+          {calcState.error ? (
+            <div className="bg-[#FEF5F5] border border-[#FBCACA] rounded-xl p-6 shadow-sm">
+              <div className="flex items-start space-x-3">
+                <svg className="w-6 h-6 text-[#D93838] flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <div>
+                  <h3 className="text-[#D93838] font-semibold text-lg">Evaluatiefout</h3>
+                  <p className="text-[#B91C1C] mt-1 font-mono text-sm">{calcState.error}</p>
+                  <p className="text-[#991B1B] mt-3 text-sm font-serif">
+                    De parser kon de expressie niet wiskundig oplossen. Bekijk het transparantierapport hieronder om te zien waar het misging.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white border border-[#EAE6E0] rounded-xl p-8 shadow-sm flex flex-col items-center justify-center min-h-[120px]">
+              {calcState.result !== null ? (
+                <div className="font-mono text-4xl text-[#2D2B2A] tracking-tight font-medium">
+                  {calcState.result}
+                </div>
+              ) : (
+                <span className="text-[#A39E96] font-serif italic">Wachtend op geldige invoer...</span>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* Transparantierapport (Audit Log) */}
+        <section className="mt-12 pt-8 border-t border-[#EAE6E0]">
+          <button 
+            onClick={() => setShowLogs(!showLogs)}
+            className="flex items-center space-x-2 text-[#5C5955] hover:text-[#2D2B2A] transition-colors font-semibold uppercase tracking-wide text-sm"
+          >
+            <svg className={`w-5 h-5 transform transition-transform ${showLogs ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+            </svg>
+            <span>Transparantierapport (Audit Log)</span>
+          </button>
+
+          {showLogs && (
+            <div className="mt-6 space-y-4">
+              <p className="text-sm text-[#6B6863] font-serif leading-relaxed max-w-3xl">
+                Voor academische verificatie toont deze log exact hoe de ruwe LaTeX is getransformeerd naar een machine-leesbare wiskundige string. Dit verzekert dat er geen verborgen aannames worden gedaan door de rekenmachine.
+              </p>
+              
+              <div className="bg-[#F8F7F5] border border-[#EAE6E0] rounded-xl overflow-hidden text-sm">
+                <div className="p-4 border-b border-[#EAE6E0] bg-[#F3F1EC] font-semibold text-[#5C5955]">
+                  Vertaalstappen
+                </div>
+                <div className="p-4 space-y-4 font-mono">
+                  {calcState.logs.length === 0 ? (
+                    <span className="text-[#A39E96] italic">Geen wijzigingen toegepast.</span>
+                  ) : (
+                    calcState.logs.map((log, i) => (
+                      <div key={i} className="pb-4 border-b border-[#EAE6E0] last:border-0 last:pb-0">
+                        <div className="text-[#8C7A6B] text-xs font-bold uppercase mb-2">{i + 1}. {log.rule}</div>
+                        <div className="text-[#D93838] break-all">- {log.from}</div>
+                        <div className="text-[#2B8A3E] break-all mt-1">+ {log.to}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Uiteindelijke Machine Expressie in Claude-stijl */}
+              <div className="mt-6 border border-[#EAE6E0] rounded-xl overflow-hidden shadow-sm relative group bg-white">
+                <div className="px-6 py-4 border-b border-[#EAE6E0] flex items-center justify-between bg-[#FDFCFB]">
+                  <div>
+                    <h3 className="text-sm font-semibold text-[#1F1E1D] tracking-tight">Uiteindelijke Machine Expressie</h3>
+                    <p className="text-xs text-[#6B6863] mt-1 font-serif">De gecompileerde, machine-leesbare string.</p>
+                  </div>
+                  <div className={`px-3 py-1 text-xs font-medium rounded-full border ${calcState.error ? 'bg-[#FEF5F5] text-[#D93838] border-[#FBCACA]' : 'bg-[#F0FDF4] text-[#15803D] border-[#DCFCE7]'}`}>
+                    {calcState.error ? 'Fout in Expressie' : 'Klaar voor Evaluatie'}
+                  </div>
+                </div>
+                <div className={`p-6 relative transition-colors duration-300 ${calcState.error ? 'bg-[#FFFAFA]' : 'bg-[#FAFAFA]'}`}>
+                  <pre className={`font-mono text-sm leading-relaxed overflow-x-auto whitespace-pre-wrap ${calcState.error ? 'text-[#B91C1C]' : 'text-[#2D2B2A]'}`}>
+                    {calcState.finalStr || "Geen expressie"}
+                  </pre>
+                  
+                  {calcState.finalStr && (
+                    <button
+                      onClick={handleCopy}
+                      className="absolute top-4 right-4 p-2 bg-white/80 backdrop-blur border border-[#EAE6E0] rounded-md text-[#6B6863] hover:text-[#1F1E1D] hover:bg-white transition-all shadow-sm opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[#D0C8B8]"
+                      title="Kopieer naar klembord"
+                    >
+                      {copied ? <CheckIcon className="text-[#15803D] w-4 h-4" /> : <CopyIcon className="w-4 h-4" />}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+            </div>
+          )}
+        </section>
+
+      </div>
+    </div>
+  );
+}
